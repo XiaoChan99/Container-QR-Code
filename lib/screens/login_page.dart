@@ -504,7 +504,7 @@ class _LoginPageState extends State<LoginPage> {
         password: password,
       );
 
-      // Get user document from Firestore
+          // Get user document from Firestore
       final userDoc = await _firestore
           .collection('users')
           .doc(userCredential.user!.uid)
@@ -520,7 +520,7 @@ class _LoginPageState extends State<LoginPage> {
       final userRole = userData['role'] as String?;
 
       // Check if user has employee role
-      if (userRole != 'USER') {
+      if (userRole != 'employee') {
         await _auth.signOut();
         _showLoginError('Access denied. Only employees can login to this app.');
         return;

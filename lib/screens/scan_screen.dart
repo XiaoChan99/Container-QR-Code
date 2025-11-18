@@ -61,7 +61,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
     _showProcessingDialog();
 
-    _sendToFirebase(qrData).then((container) {
+    _sendToFirebase(qrData, parsedData).then((container) {
       print('Firebase save completed successfully');
       
       _recentlyScanned.add(container.containerId);
@@ -80,30 +80,44 @@ class _ScanScreenState extends State<ScanScreen> {
     });
   }
 
-  Future<ContainerData> _sendToFirebase(String qrData) async {
+  Future<ContainerData> _sendToFirebase(String qrData, Map<String, dynamic> parsedData) async {
     try {
-      final Map<String, dynamic> parsedData = _parseQRData(qrData);
       final container = _createContainerFromQRData(parsedData, qrData);
       
-      final DocumentSnapshot existingDoc = await _firestore
-          .collection('Containers')
-          .doc(container.containerId)
-          .get();
+      // Extract additional fields from parsed QR data
+      final String consignorName = parsedData['consignor']?.toString() ?? '';
+      final String consignorAddress = parsedData['consignoraddress']?.toString() ?? '';
+      final String consigneeName = parsedData['consignee']?.toString() ?? '';
+      final String consigneeAddress = parsedData['consigneeaddress']?.toString() ?? '';
+      final String billOfLading = parsedData['billoflading']?.toString() ?? '';
+      final String sealNumber = parsedData['sealnumber']?.toString() ?? '';
       
-      if (existingDoc.exists) {
-        final existingData = existingDoc.data() as Map<String, dynamic>?;
-        final existingTimestamp = existingData?['scannedAt'] as Timestamp?;
-        
-        if (existingTimestamp != null) {
-          final timeDifference = DateTime.now().difference(existingTimestamp.toDate());
-          
-          if (timeDifference.inMinutes < 5) {
-            throw Exception('Container ${container.containerId} was already scanned ${timeDifference.inMinutes} minutes ago');
-          }
-        }
-      }
-      
-      final containerData = container.toFirestore();
+      // Create Firebase-specific data with all required fields
+      final Map<String, dynamic> containerData = {
+        'containerId': container.containerId,
+        'containerNumber': container.containerNumber,
+        'voyageId': container.voyageId,
+        'priority': _enumToString(container.priority),
+        'dateCreated': Timestamp.fromDate(container.dateCreated),
+        'releaseDate': Timestamp.fromDate(container.releaseDate),
+        'cargoType': _enumToString(container.cargoType),
+        'status': _enumToString(container.status),
+        'location': container.location,
+        'stackPosition': container.stackPosition,
+        'tierLevel': container.tierLevel,
+        'allocatedBayId': container.allocatedBayId,
+        'allocationStatus': container.allocationStatus,
+        'scannedAt': Timestamp.now(),
+        'lastUpdated': Timestamp.now(),
+        // Additional fields from QR code
+        'consignorName': consignorName,
+        'consignorAddress': consignorAddress,
+        'consigneeName': consigneeName,
+        'consigneeAddress': consigneeAddress,
+        'billOfLading': billOfLading,
+        'sealNumber': sealNumber,
+        'deliveredBy': '', // Will be populated later or as needed
+      };
 
       print('Saving container data: $containerData');
 
@@ -170,18 +184,14 @@ class _ScanScreenState extends State<ScanScreen> {
     final DateTime dateCreated = _parseDate(parsedData['datecreated']?.toString()) ?? 
                                 DateTime.now().subtract(Duration(days: random % 30));
     
-    final DateTime releaseDate = _parseDate(parsedData['releasedate']?.toString()) ?? 
-                                _calculateReleaseDate(
-                                  _parseEnumFromString(parsedData['priority']?.toString(), Priority.values) ?? priorities[random % priorities.length],
-                                  dateCreated
-                                );
-
     final Priority priority = _parseEnumFromString(parsedData['priority']?.toString(), Priority.values) ?? priorities[random % priorities.length];
-    final CargoType cargoType = _parseEnumFromString(parsedData['cargotype']?.toString(), CargoType.values) ?? cargoTypes[random % cargoTypes.length];
-    final ContainerStatus status = _parseEnumFromString(parsedData['status']?.toString(), statuses) ?? statuses[random % statuses.length];
+    
+    final DateTime releaseDate = _parseDate(parsedData['releasedate']?.toString()) ?? 
+                                _calculateReleaseDate(priority, dateCreated);
 
-    // Generate location data based on container ID for consistency
-    final locationData = _generateLocationData(containerId, random);
+    final CargoType cargoType = _parseEnumFromString(parsedData['cargotype']?.toString(), CargoType.values) ?? cargoTypes[random % cargoTypes.length];
+    
+    final ContainerStatus status = _parseEnumFromString(parsedData['status']?.toString(), statuses) ?? statuses[0];
 
     return ContainerData(
       containerId: containerId,
@@ -192,32 +202,14 @@ class _ScanScreenState extends State<ScanScreen> {
       releaseDate: releaseDate,
       cargoType: cargoType,
       status: status,
-      location: parsedData['location']?.toString() ?? locationData['location'],
-      stackPosition: parsedData['stackposition']?.toString() ?? locationData['stackPosition'],
-      tierLevel: int.tryParse(parsedData['tierlevel']?.toString() ?? '') ?? locationData['tierLevel'],
-      allocatedBayId: parsedData['allocatedbayid']?.toString() ?? locationData['allocatedBayId'],
-      allocationStatus: parsedData['allocationstatus']?.toString() ?? locationData['allocationStatus'],
+      location: '',
+      stackPosition: '',
+      tierLevel: 0,
+      allocatedBayId: '',
+      allocationStatus: 'pending',
       scannedAt: DateTime.now(),
       lastUpdated: DateTime.now(),
     );
-  }
-
-  Map<String, dynamic> _generateLocationData(String containerId, int random) {
-    final bays = ['bay_1', 'bay_2', 'bay_3', 'bay_4'];
-    final stackPositions = ['1_1', '1_2', '2_1', '2_2', '3_1', '3_2'];
-    final allocationStatuses = ['pending', 'allocated', 'confirmed', 'released'];
-    
-    final bay = bays[random % bays.length];
-    final stack = stackPositions[random % stackPositions.length];
-    final allocationStatus = allocationStatuses[random % allocationStatuses.length];
-    
-    return {
-      'location': '${bay}_${stack}',
-      'stackPosition': stack,
-      'tierLevel': (random % 5) + 1,
-      'allocatedBayId': bay,
-      'allocationStatus': allocationStatus,
-    };
   }
 
   DateTime _calculateReleaseDate(Priority priority, DateTime dateCreated) {
@@ -515,23 +507,6 @@ class _ScanScreenState extends State<ScanScreen> {
                           isReleased ? 'Ready for Release' : 'Release in $daysUntilRelease days',
                           style: TextStyle(
                             color: isReleased ? Colors.green : Colors.orange,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Icon(Icons.location_on, color: Colors.blue, size: 14),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          container.location,
-                          style: const TextStyle(
-                            color: Colors.blue,
                             fontWeight: FontWeight.w600,
                             fontSize: 12,
                           ),
@@ -852,14 +827,12 @@ Container Number: C${DateTime.now().millisecondsSinceEpoch % 10000}
 Voyage ID: V${(DateTime.now().millisecondsSinceEpoch % 1000).toString().padLeft(3, '0')}
 Priority: ${Priority.values[DateTime.now().millisecondsSinceEpoch % Priority.values.length].displayName}
 Cargo Type: ${CargoType.values[DateTime.now().millisecondsSinceEpoch % CargoType.values.length].displayName}
-Status: ${ContainerStatus.values[DateTime.now().millisecondsSinceEpoch % ContainerStatus.values.length].displayName}
-Location: bay_${(DateTime.now().millisecondsSinceEpoch % 4) + 1}_${(DateTime.now().millisecondsSinceEpoch % 3) + 1}_${(DateTime.now().millisecondsSinceEpoch % 2) + 1}
 Date Created: ${DateTime.now().subtract(Duration(days: DateTime.now().millisecondsSinceEpoch % 30)).toIso8601String()}
 Release Date: ${DateTime.now().add(Duration(days: (DateTime.now().millisecondsSinceEpoch % 10) + 1)).toIso8601String()}
 ''');
               },
               icon: const Icon(Icons.qr_code),
-              label: const Text('Simulate QR Scan with Full Data'),
+              label: const Text('Simulate QR Scan'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF1a3a6b),
                 foregroundColor: Colors.white,
