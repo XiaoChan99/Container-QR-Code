@@ -1,3 +1,4 @@
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -19,6 +20,9 @@ class _ScanScreenState extends State<ScanScreen> {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final Set<String> _recentlyScanned = {};
   Timer? _clearRecentTimer;
+  
+  // Location constant
+  static const String location = "Don Carlos A. Gothong Port Centre, Quezon Boulevard, Pier 4, Cebu City.";
 
   @override
   void initState() {
@@ -82,7 +86,9 @@ class _ScanScreenState extends State<ScanScreen> {
 
   Future<ContainerData> _sendToFirebase(String qrData, Map<String, dynamic> parsedData) async {
     try {
-      final container = _createContainerFromQRData(parsedData, qrData);
+      // Get the next container ID based on existing data
+      final int nextContainerId = await _getNextContainerId();
+      final container = _createContainerFromQRData(parsedData, qrData, nextContainerId);
       
       // Extract additional fields from parsed QR data
       final String consignorName = parsedData['consignor']?.toString() ?? '';
@@ -91,6 +97,7 @@ class _ScanScreenState extends State<ScanScreen> {
       final String consigneeAddress = parsedData['consigneeaddress']?.toString() ?? '';
       final String billOfLading = parsedData['billoflading']?.toString() ?? '';
       final String sealNumber = parsedData['sealnumber']?.toString() ?? '';
+      final String destination = parsedData['destination']?.toString() ?? '';
       
       // Create Firebase-specific data with all required fields
       final Map<String, dynamic> containerData = {
@@ -102,7 +109,7 @@ class _ScanScreenState extends State<ScanScreen> {
         'releaseDate': Timestamp.fromDate(container.releaseDate),
         'cargoType': _enumToString(container.cargoType),
         'status': _enumToString(container.status),
-        'location': container.location,
+        'location': location, // Using the constant location
         'stackPosition': container.stackPosition,
         'tierLevel': container.tierLevel,
         'allocatedBayId': container.allocatedBayId,
@@ -117,6 +124,7 @@ class _ScanScreenState extends State<ScanScreen> {
         'billOfLading': billOfLading,
         'sealNumber': sealNumber,
         'deliveredBy': '', // Will be populated later or as needed
+        'destination': destination, // Add destination field
       };
 
       print('Saving container data: $containerData');
@@ -132,6 +140,44 @@ class _ScanScreenState extends State<ScanScreen> {
     } catch (e) {
       print('Error saving to Firebase: $e');
       throw Exception('Failed to save container data: $e');
+    }
+  }
+
+  // NEW METHOD: Get the next container ID based on existing data
+  Future<int> _getNextContainerId() async {
+    try {
+      // Query all containers to find the highest containerId
+      final querySnapshot = await _firestore
+          .collection('Containers')
+          .get();
+
+      int highestId = 0;
+      
+      for (final doc in querySnapshot.docs) {
+        final data = doc.data();
+        
+        // Check containerId field
+        if (data.containsKey('containerId')) {
+          final containerIdStr = data['containerId'].toString();
+          final containerId = int.tryParse(containerIdStr);
+          if (containerId != null && containerId > highestId) {
+            highestId = containerId;
+          }
+        }
+        
+        // Also check document ID as fallback
+        final docId = int.tryParse(doc.id);
+        if (docId != null && docId > highestId) {
+          highestId = docId;
+        }
+      }
+      
+      // Return next ID (highest + 1)
+      return highestId + 1;
+    } catch (e) {
+      print('Error getting next container ID: $e');
+      // Fallback: use timestamp
+      return DateTime.now().millisecondsSinceEpoch;
     }
   }
 
@@ -165,16 +211,14 @@ class _ScanScreenState extends State<ScanScreen> {
     return parsedData;
   }
 
-  ContainerData _createContainerFromQRData(Map<String, dynamic> parsedData, String originalQrData) {
+  ContainerData _createContainerFromQRData(Map<String, dynamic> parsedData, String originalQrData, int nextContainerId) {
     final random = originalQrData.hashCode;
     final priorities = Priority.values;
     final cargoTypes = CargoType.values;
     final statuses = ContainerStatus.values;
 
-    String containerId = parsedData['containerid']?.toString() ?? 
-                        'CON${DateTime.now().millisecondsSinceEpoch}';
-    
-    containerId = _cleanContainerId(containerId);
+    // Use the calculated nextContainerId instead of parsing from QR
+    String containerId = nextContainerId.toString();
     
     String containerNumber = parsedData['containernumber']?.toString() ?? 
                             'C${containerId.length > 3 ? containerId.substring(0, 3) : containerId}';
@@ -193,6 +237,9 @@ class _ScanScreenState extends State<ScanScreen> {
     
     final ContainerStatus status = _parseEnumFromString(parsedData['status']?.toString(), statuses) ?? statuses[0];
 
+    // Only destination field
+    final String destination = parsedData['destination']?.toString() ?? '';
+
     return ContainerData(
       containerId: containerId,
       containerNumber: containerNumber,
@@ -202,13 +249,15 @@ class _ScanScreenState extends State<ScanScreen> {
       releaseDate: releaseDate,
       cargoType: cargoType,
       status: status,
-      location: '',
+      location: location, // Using the constant location
       stackPosition: '',
       tierLevel: 0,
       allocatedBayId: '',
       allocationStatus: 'pending',
       scannedAt: DateTime.now(),
       lastUpdated: DateTime.now(),
+      // Only destination field
+      destination: destination,
     );
   }
 
@@ -455,7 +504,7 @@ class _ScanScreenState extends State<ScanScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          container.containerId,
+                          'Container ID: ${container.containerId}',
                           style: const TextStyle(
                             color: Color(0xFF1a3a6b),
                             fontWeight: FontWeight.bold,
@@ -514,6 +563,26 @@ class _ScanScreenState extends State<ScanScreen> {
                       ),
                     ],
                   ),
+                  // Add destination display
+                  if (container.destination.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Icon(Icons.location_on, color: const Color(0xFF1a3a6b), size: 14),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Destination: ${container.destination}',
+                            style: const TextStyle(
+                              color: Color(0xFF1a3a6b),
+                              fontWeight: FontWeight.w600,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -821,14 +890,11 @@ class _ScanScreenState extends State<ScanScreen> {
             const SizedBox(height: 24),
             ElevatedButton.icon(
               onPressed: isProcessing ? null : () {
-                _processScannedData('''
-Container ID: CON${DateTime.now().millisecondsSinceEpoch}
+                _processScannedData('''Container ID: ${DateTime.now().millisecondsSinceEpoch % 1000 + 1}
 Container Number: C${DateTime.now().millisecondsSinceEpoch % 10000}
-Voyage ID: V${(DateTime.now().millisecondsSinceEpoch % 1000).toString().padLeft(3, '0')}
 Priority: ${Priority.values[DateTime.now().millisecondsSinceEpoch % Priority.values.length].displayName}
 Cargo Type: ${CargoType.values[DateTime.now().millisecondsSinceEpoch % CargoType.values.length].displayName}
-Date Created: ${DateTime.now().subtract(Duration(days: DateTime.now().millisecondsSinceEpoch % 30)).toIso8601String()}
-Release Date: ${DateTime.now().add(Duration(days: (DateTime.now().millisecondsSinceEpoch % 10) + 1)).toIso8601String()}
+Destination: New York, USA
 ''');
               },
               icon: const Icon(Icons.qr_code),

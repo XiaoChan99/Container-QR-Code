@@ -48,54 +48,89 @@ enum Priority {
 }
 
 enum CargoType {
-  general,
+  dry,
   refrigerated,
   hazardous,
+  open_top,
+  perishable,
+  bulk,
+  containerized,
+  fragile,
   liquid,
-  dry;
+  general;
 
   String get displayName {
     switch (this) {
-      case CargoType.general:
-        return 'General';
+      case CargoType.dry:
+        return 'Dry';
       case CargoType.refrigerated:
         return 'Refrigerated';
       case CargoType.hazardous:
         return 'Hazardous';
+      case CargoType.open_top:
+        return 'Open Top';
+      case CargoType.perishable:
+        return 'Perishable';
+      case CargoType.bulk:
+        return 'Bulk';
+      case CargoType.containerized:
+        return 'Containerized';
+      case CargoType.fragile:
+        return 'Fragile';
       case CargoType.liquid:
         return 'Liquid';
-      case CargoType.dry:
-        return 'Dry';
+      case CargoType.general:
+        return 'General';
     }
   }
 
   IconData get icon {
     switch (this) {
-      case CargoType.general:
-        return Icons.inventory;
+      case CargoType.dry:
+        return Icons.grain;
       case CargoType.refrigerated:
         return Icons.ac_unit;
       case CargoType.hazardous:
         return Icons.warning;
+      case CargoType.open_top:
+        return Icons.open_in_full;
+      case CargoType.perishable:
+        return Icons.agriculture;
+      case CargoType.bulk:
+        return Icons.warehouse;
+      case CargoType.containerized:
+        return Icons.inventory;
+      case CargoType.fragile:
+        return Icons.breakfast_dining;
       case CargoType.liquid:
         return Icons.water_drop;
-      case CargoType.dry:
-        return Icons.grain;
+      case CargoType.general:
+        return Icons.inventory_2;
     }
   }
 
   Color get color {
     switch (this) {
-      case CargoType.general:
-        return Colors.blue;
+      case CargoType.dry:
+        return Colors.brown;
       case CargoType.refrigerated:
         return Colors.cyan;
       case CargoType.hazardous:
         return Colors.red;
+      case CargoType.open_top:
+        return Colors.orange;
+      case CargoType.perishable:
+        return Colors.green;
+      case CargoType.bulk:
+        return Colors.blueGrey;
+      case CargoType.containerized:
+        return Colors.blue;
+      case CargoType.fragile:
+        return Colors.pink;
       case CargoType.liquid:
         return Colors.blue;
-      case CargoType.dry:
-        return Colors.brown;
+      case CargoType.general:
+        return Colors.grey;
     }
   }
 }
@@ -177,6 +212,9 @@ class ContainerData {
   final DateTime scannedAt;
   final DateTime lastUpdated;
 
+  // Only destination field
+  final String destination;
+
   ContainerData({
     required this.containerId,
     required this.containerNumber,
@@ -193,6 +231,8 @@ class ContainerData {
     required this.allocationStatus,
     required this.scannedAt,
     required this.lastUpdated,
+    // Only destination field
+    this.destination = '',
   });
 
   // Convert from Firestore document
@@ -211,11 +251,17 @@ class ContainerData {
     
     CargoType parseCargoType(String cargoType) {
       switch (cargoType.toLowerCase()) {
-        case 'general': return CargoType.general;
+        case 'dry': return CargoType.dry;
         case 'refrigerated': return CargoType.refrigerated;
         case 'hazardous': return CargoType.hazardous;
+        case 'open_top':
+        case 'open top': return CargoType.open_top;
+        case 'perishable': return CargoType.perishable;
+        case 'bulk': return CargoType.bulk;
+        case 'containerized': return CargoType.containerized;
+        case 'fragile': return CargoType.fragile;
         case 'liquid': return CargoType.liquid;
-        case 'dry': return CargoType.dry;
+        case 'general': return CargoType.general;
         default: return CargoType.general;
       }
     }
@@ -253,6 +299,8 @@ class ContainerData {
       releaseDate: (data['releaseDate'] as Timestamp?)?.toDate() ?? DateTime.now(),
       scannedAt: (data['scannedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       lastUpdated: (data['lastUpdated'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      // Only destination field
+      destination: data['destination']?.toString() ?? '',
     );
   }
 
@@ -274,6 +322,8 @@ class ContainerData {
       'releaseDate': Timestamp.fromDate(releaseDate),
       'scannedAt': Timestamp.fromDate(scannedAt),
       'lastUpdated': Timestamp.fromDate(lastUpdated),
+      // Only destination field
+      'destination': destination,
     };
   }
 

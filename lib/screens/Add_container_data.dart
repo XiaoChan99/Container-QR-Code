@@ -2,11 +2,11 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import 'package:qr_scanner/screens/container_detail_screen.dart';
-import 'container_detail_screen.dart';
-import 'dart:html' as html;
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class AddContainerData extends StatefulWidget {
   const AddContainerData({super.key});
@@ -16,11 +16,15 @@ class AddContainerData extends StatefulWidget {
 }
 
 class _AddContainerDataState extends State<AddContainerData> {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  bool _isLoading = true;
+  bool _isLoading = false;
   bool _showAddContainer = false;
   String? _generatedQRData;
   int _nextContainerId = 1;
+  bool _hasGeneratedQR = false;
+
+  // Tracking variables
+  List<String> _recentContainers = [];
+  String? _lastScannedContainerId;
 
   // Form Controllers
   final _containerNumberController = TextEditingController();
@@ -32,9 +36,12 @@ class _AddContainerDataState extends State<AddContainerData> {
   final _consigneeAddressController = TextEditingController();
   final _billingLadingController = TextEditingController();
   final _sealNoController = TextEditingController();
+  final _destinationController = TextEditingController();
 
   String _selectedPriority = 'medium';
   String _selectedCargoType = 'dry';
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   @override
   void initState() {
@@ -44,83 +51,282 @@ class _AddContainerDataState extends State<AddContainerData> {
 
   Future<void> _loadNextContainerId() async {
     try {
-      final counterDoc = await _firestore.collection('counters').doc('containers').get();
+      setState(() {
+        _isLoading = true;
+      });
+
+      int highestFirestoreId = await _getHighestContainerIdFromFirestore();
       
-      if (counterDoc.exists) {
-        setState(() {
-          _nextContainerId = counterDoc.data()!['lastId'] + 1;
-          _isLoading = false;
-        });
+      final prefs = await SharedPreferences.getInstance();
+      final lastLocalId = prefs.getInt('lastContainerId') ?? 0;
+      
+      int nextId = (highestFirestoreId > lastLocalId ? highestFirestoreId : lastLocalId);
+      
+      if (nextId > 0) {
+        nextId++;
       } else {
-        // Initialize counter if it doesn't exist
-        await _firestore.collection('counters').doc('containers').set({'lastId': 0});
-        setState(() {
-          _nextContainerId = 1;
-          _isLoading = false;
-        });
+        nextId = 1;
       }
+      
+      setState(() {
+        _nextContainerId = nextId;
+        _isLoading = false;
+        _hasGeneratedQR = false;
+      });
     } catch (e) {
       print('Error loading next container ID: $e');
       setState(() {
+        _nextContainerId = 1;
         _isLoading = false;
+        _hasGeneratedQR = false;
       });
     }
   }
 
-  Future<void> _saveContainerToFirestore(String qrData) async {
+  Future<int> _getHighestContainerIdFromFirestore() async {
     try {
-      // Create container data
-      final containerData = {
-        'containerId': _nextContainerId,
-        'containerNumber': _containerNumberController.text,
-        'priority': _selectedPriority,
-        'cargoType': _selectedCargoType,
-        'consignor': {
-          'name': _consignorNameController.text,
-          'email': _consignorEmailController.text,
-          'address': _consignorAddressController.text,
-        },
-        'consignee': {
-          'name': _consigneeNameController.text,
-          'email': _consigneeEmailController.text,
-          'address': _consigneeAddressController.text,
-        },
-        'billOfLading': _billingLadingController.text,
-        'sealNumber': _sealNoController.text,
-        'qrCodeData': qrData,
-        'createdAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-        'status': 'active',
-      };
+      final querySnapshot = await _firestore
+          .collection('Containers')
+          .get();
 
-      // Save container to Firestore
-      await _firestore.collection('Containers').doc(_nextContainerId.toString()).set(containerData);
-
-      // Update the counter
-      await _firestore.collection('counters').doc('containers').update({
-        'lastId': _nextContainerId,
-      });
-
-      print('Container saved successfully with ID: $_nextContainerId');
+      int highestId = 0;
+      
+      for (final doc in querySnapshot.docs) {
+        final data = doc.data();
+        
+        if (data.containsKey('containerId')) {
+          final containerIdStr = data['containerId'].toString();
+          final containerId = int.tryParse(containerIdStr);
+          if (containerId != null && containerId > highestId) {
+            highestId = containerId;
+          }
+        }
+        
+        final docId = int.tryParse(doc.id);
+        if (docId != null && docId > highestId) {
+          highestId = docId;
+        }
+      }
+      
+      return highestId;
     } catch (e) {
-      print('Error saving container to Firestore: $e');
-      throw e;
+      print('Error getting highest container ID from Firestore: $e');
+      return 0;
     }
   }
 
-  // For web: Download QR code instead of saving to file
-  Future<void> _downloadQRCode(Uint8List qrImageBytes, String containerId) async {
+  Future<void> _saveLastContainerId() async {
     try {
-      final blob = html.Blob([qrImageBytes], 'image/png');
-      final url = html.Url.createObjectUrlFromBlob(blob);
-      final link = html.AnchorElement(href: url)
-        ..setAttribute('download', 'container_${containerId}_qr.png')
-        ..click();
-      html.Url.revokeObjectUrl(url);
-      print('QR code downloaded successfully');
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('lastContainerId', _nextContainerId);
     } catch (e) {
-      print('Error downloading QR code: $e');
+      print('Error saving last container ID: $e');
     }
+  }
+
+  // Universal download method that works on all platforms
+  Future<void> _downloadQRCode(Uint8List qrImageBytes, int containerId) async {
+    try {
+      // For web, use a different approach
+      if (kIsWeb) {
+        _downloadForWeb(qrImageBytes, containerId);
+      } else {
+        // For mobile, use file system
+        await _downloadForMobile(qrImageBytes, containerId);
+      }
+    } catch (e) {
+      print('Error saving QR code: $e');
+      _showErrorDialog('Error saving QR code. Please use the manual download option.');
+    }
+  }
+
+  // Check if running on web
+  bool get kIsWeb => identical(0, 0.0);
+
+  // Download method for Web using data URLs
+  void _downloadForWeb(Uint8List qrImageBytes, int containerId) {
+    try {
+      // Convert bytes to base64
+      final base64 = _bytesToBase64(qrImageBytes);
+      final dataUrl = 'data:image/png;base64,$base64';
+      
+      // Create a temporary anchor element for download
+      _downloadFromDataUrl(dataUrl, 'container_${containerId}_qr.png');
+      
+      _showDownloadSuccessDialog('Downloads Folder', 'Web Browser');
+    } catch (e) {
+      print('Web download failed: $e');
+      _showManualDownloadInstructions();
+    }
+  }
+
+  // Convert bytes to base64 for web
+  String _bytesToBase64(Uint8List bytes) {
+    final values = bytes.map((byte) => String.fromCharCode(byte)).join('');
+    return _base64Encode(values);
+  }
+
+  // Base64 encoding for web
+  String _base64Encode(String input) {
+    try {
+      // For web, we'll use a simple base64 encoding
+      final base64Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      final result = StringBuffer();
+      int i = 0;
+      
+      while (i < input.length) {
+        final a = i < input.length ? input.codeUnitAt(i++) : 0;
+        final b = i < input.length ? input.codeUnitAt(i++) : 0;
+        final c = i < input.length ? input.codeUnitAt(i++) : 0;
+        
+        final bitmap = (a << 16) | (b << 8) | c;
+        
+        result.write(base64Chars[(bitmap >> 18) & 63]);
+        result.write(base64Chars[(bitmap >> 12) & 63]);
+        result.write(base64Chars[(bitmap >> 6) & 63]);
+        result.write(base64Chars[bitmap & 63]);
+      }
+      
+      // Handle padding
+      final padding = input.length % 3;
+      if (padding > 0) {
+        result.write('=='.substring(0, 3 - padding));
+      }
+      
+      return result.toString();
+    } catch (e) {
+      // Fallback: try to launch the image in a new tab
+      _showManualDownloadInstructions();
+      return '';
+    }
+  }
+
+  // Download using data URL - web compatible approach
+  void _downloadFromDataUrl(String dataUrl, String fileName) {
+    try {
+      // For web, we'll open the image in a new tab and let user save it manually
+      launchUrl(Uri.parse(dataUrl), mode: LaunchMode.externalApplication);
+    } catch (e) {
+      print('Failed to launch URL: $e');
+      _showManualDownloadInstructions();
+    }
+  }
+
+  // Download method for Mobile
+  Future<void> _downloadForMobile(Uint8List qrImageBytes, int containerId) async {
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final filePath = '${directory.path}/container_${containerId}_qr.png';
+      final file = File(filePath);
+      
+      await file.writeAsBytes(qrImageBytes);
+      _showDownloadSuccessDialog(filePath, 'Documents Folder');
+      print('QR code saved to: $filePath');
+    } catch (e) {
+      print('Mobile download failed: $e');
+      _showErrorDialog('Error saving QR code: ${e.toString()}');
+    }
+  }
+
+  // Show manual download instructions
+  void _showManualDownloadInstructions() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Download Instructions', style: TextStyle(color: Color(0xFF1a3a6b))),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.info, color: Colors.orange, size: 50),
+            SizedBox(height: 16),
+            Text(
+              'To download the QR code:',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 12),
+            Text(
+              '1. Right-click on the QR code image\n'
+              '2. Select "Save image as..."\n'
+              '3. Choose where to save the file\n'
+              '4. Name it "container_[ID]_qr.png"',
+              style: TextStyle(fontSize: 14),
+            ),
+            SizedBox(height: 12),
+            Container(
+              padding: EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                'The image will open in a new tab. Use your browser\'s save option.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('OK', style: TextStyle(color: Color(0xFF1a3a6b))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDownloadSuccessDialog(String location, String locationType) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('QR Code Downloaded!', style: TextStyle(color: Color(0xFF1a3a6b))),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.check_circle, color: Colors.green, size: 50),
+            SizedBox(height: 16),
+            Text(
+              'QR code has been downloaded successfully!',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 16),
+            ),
+            SizedBox(height: 12),
+            Container(
+              padding: EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.green.shade200),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.download_done, color: Colors.green.shade700, size: 20),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      locationType == 'Web Browser' 
+                        ? 'Check your browser downloads folder'
+                        : 'File saved to: $location',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.green.shade700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('OK', style: TextStyle(color: Color(0xFF1a3a6b))),
+          ),
+        ],
+      ),
+    );
   }
 
   void _generateQRCode() async {
@@ -129,7 +335,8 @@ class _AddContainerDataState extends State<AddContainerData> {
       return;
     }
 
-    final qrData = '''Container ID: $_nextContainerId
+    final currentContainerId = _nextContainerId;
+    final qrData = '''Container ID: ${currentContainerId}
 Container Number: ${_containerNumberController.text}
 Priority: $_selectedPriority
 Cargo Type: $_selectedCargoType
@@ -141,13 +348,19 @@ Consignee Email: ${_consigneeEmailController.text}
 Consignee Address: ${_consigneeAddressController.text}
 Bill of Lading: ${_billingLadingController.text}
 Seal Number: ${_sealNoController.text}
+Destination: ${_destinationController.text}
 Generated on: ${DateTime.now().toString()}''';
 
     setState(() {
       _generatedQRData = qrData;
+      _recentContainers.add(currentContainerId.toString());
+      if (_recentContainers.length > 1000) {
+        _recentContainers.removeAt(0);
+      }
+      _lastScannedContainerId = currentContainerId.toString();
+      _hasGeneratedQR = true;
     });
 
-    // Show loading dialog
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -159,10 +372,6 @@ Generated on: ${DateTime.now().toString()}''';
     );
 
     try {
-      // Save to Firestore first
-      await _saveContainerToFirestore(qrData);
-
-      // Generate QR code image
       final qrImage = await QrPainter(
         data: qrData,
         version: QrVersions.auto,
@@ -172,11 +381,16 @@ Generated on: ${DateTime.now().toString()}''';
       ).toImageData(300.0);
       
       if (mounted) {
-        Navigator.pop(context); // Close loading dialog
+        Navigator.pop(context);
         
         if (qrImage != null) {
           final qrImageBytes = qrImage.buffer.asUint8List();
-          _showQRCodeDialog(qrData, qrImageBytes);
+          _showQRCodeDialog(qrData, qrImageBytes, currentContainerId);
+          
+          setState(() {
+            _nextContainerId++;
+          });
+          await _saveLastContainerId();
         } else {
           _showErrorDialog('Failed to generate QR code image');
         }
@@ -184,8 +398,8 @@ Generated on: ${DateTime.now().toString()}''';
     } catch (e) {
       print('Error generating QR code: $e');
       if (mounted) {
-        Navigator.pop(context); // Close loading dialog
-        _showErrorDialog('Error saving container data: $e');
+        Navigator.pop(context);
+        _showErrorDialog('Error generating QR code: $e');
       }
     }
   }
@@ -229,6 +443,10 @@ Generated on: ${DateTime.now().toString()}''';
       _showErrorDialog('Please enter seal number');
       return false;
     }
+    if (_destinationController.text.isEmpty) {
+      _showErrorDialog('Please enter destination');
+      return false;
+    }
     return true;
   }
 
@@ -237,7 +455,10 @@ Generated on: ${DateTime.now().toString()}''';
         .hasMatch(email);
   }
 
-  void _showQRCodeDialog(String qrData, Uint8List qrImageBytes) {
+  void _showQRCodeDialog(String qrData, Uint8List qrImageBytes, int containerId) {
+    int containerSequence = _recentContainers.indexOf(containerId.toString()) + 1;
+    String sequenceText = _getSequenceText(containerSequence);
+    
     showDialog(
       context: context,
       builder: (context) => Dialog(
@@ -249,7 +470,7 @@ Generated on: ${DateTime.now().toString()}''';
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Container QR Code Generated & Saved!',
+                  'QR Code Generated Successfully!',
                   style: TextStyle(
                     color: const Color(0xFF1a3a6b),
                     fontWeight: FontWeight.bold,
@@ -257,13 +478,45 @@ Generated on: ${DateTime.now().toString()}''';
                   ),
                   textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.shade200),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.info, color: Colors.orange.shade700, size: 16),
+                      const SizedBox(width: 8),
+                      Text(
+                        'This is your $sequenceText container',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.orange.shade700,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
                 Text(
-                  'Container ID: $_nextContainerId',
+                  'Container ID: $containerId',
                   style: const TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
                     color: Color(0xFF1a3a6b),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Container Number: ${_containerNumberController.text}',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey,
                   ),
                 ),
                 const SizedBox(height: 20),
@@ -288,20 +541,20 @@ Generated on: ${DateTime.now().toString()}''';
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.green.shade50,
+                    color: Colors.blue.shade50,
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.green.shade200),
+                    border: Border.all(color: Colors.blue.shade200),
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.check_circle, color: Colors.green.shade700, size: 20),
+                      Icon(Icons.info, color: Colors.blue.shade700, size: 20),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'Container data saved to database successfully!',
+                          'QR code contains all container data. Scan this QR code to save the container to the database.',
                           style: TextStyle(
                             fontSize: 12,
-                            color: Colors.green.shade700,
+                            color: Colors.blue.shade700,
                             fontWeight: FontWeight.w500,
                           ),
                         ),
@@ -313,20 +566,20 @@ Generated on: ${DateTime.now().toString()}''';
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.blue.shade50,
+                    color: Colors.green.shade50,
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.blue.shade200),
+                    border: Border.all(color: Colors.green.shade200),
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.info, color: Colors.blue.shade700, size: 20),
+                      Icon(Icons.qr_code_scanner, color: Colors.green.shade700, size: 20),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'QR code contains all container data. Click Download to save it.',
+                          'Use the Scan Screen to scan this QR code and save container data',
                           style: TextStyle(
                             fontSize: 12,
-                            color: Colors.blue.shade700,
+                            color: Colors.green.shade700,
                             fontWeight: FontWeight.w500,
                           ),
                         ),
@@ -347,7 +600,7 @@ Generated on: ${DateTime.now().toString()}''';
                     ),
                     ElevatedButton.icon(
                       onPressed: () {
-                        _downloadQRCode(qrImageBytes, _nextContainerId.toString());
+                        _downloadQRCode(qrImageBytes, containerId);
                       },
                       icon: const Icon(Icons.download),
                       label: const Text('Download QR'),
@@ -377,12 +630,85 @@ Generated on: ${DateTime.now().toString()}''';
                     ),
                   ],
                 ),
+                // Alternative download instruction for web
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Text(
+                    'Tip: Right-click on the QR code and select "Save image as..."',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.grey[600],
+                      fontStyle: FontStyle.italic,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  String _getSequenceText(int sequence) {
+    if (sequence >= 1 && sequence <= 10) {
+      switch (sequence) {
+        case 1: return 'first';
+        case 2: return 'second';
+        case 3: return 'third';
+        case 4: return 'fourth';
+        case 5: return 'fifth';
+        case 6: return 'sixth';
+        case 7: return 'seventh';
+        case 8: return 'eighth';
+        case 9: return 'ninth';
+        case 10: return 'tenth';
+      }
+    } else if (sequence >= 11 && sequence <= 20) {
+      switch (sequence) {
+        case 11: return 'eleventh';
+        case 12: return 'twelfth';
+        case 13: return 'thirteenth';
+        case 14: return 'fourteenth';
+        case 15: return 'fifteenth';
+        case 16: return 'sixteenth';
+        case 17: return 'seventeenth';
+        case 18: return 'eighteenth';
+        case 19: return 'nineteenth';
+        case 20: return 'twentieth';
+      }
+    } else if (sequence == 21) return 'twenty-first';
+    else if (sequence == 22) return 'twenty-second';
+    else if (sequence == 23) return 'twenty-third';
+    else if (sequence == 24) return 'twenty-fourth';
+    else if (sequence == 25) return 'twenty-fifth';
+    else if (sequence == 26) return 'twenty-sixth';
+    else if (sequence == 27) return 'twenty-seventh';
+    else if (sequence == 28) return 'twenty-eighth';
+    else if (sequence == 29) return 'twenty-ninth';
+    else if (sequence == 30) return 'thirtieth';
+    else if (sequence == 31) return 'thirty-first';
+    else if (sequence == 32) return 'thirty-second';
+    else if (sequence == 33) return 'thirty-third';
+    else if (sequence == 40) return 'fortieth';
+    else if (sequence == 50) return 'fiftieth';
+    else if (sequence == 60) return 'sixtieth';
+    else if (sequence == 70) return 'seventieth';
+    else if (sequence == 80) return 'eightieth';
+    else if (sequence == 90) return 'ninetieth';
+    else if (sequence == 100) return 'hundredth';
+    else if (sequence == 200) return 'two hundredth';
+    else if (sequence == 300) return 'three hundredth';
+    else if (sequence == 400) return 'four hundredth';
+    else if (sequence == 500) return 'five hundredth';
+    else if (sequence == 600) return 'six hundredth';
+    else if (sequence == 700) return 'seven hundredth';
+    else if (sequence == 800) return 'eight hundredth';
+    else if (sequence == 900) return 'nine hundredth';
+    else if (sequence == 1000) return 'thousandth';
+    
+    return '$sequence-th';
   }
 
   void _resetForm() {
@@ -395,13 +721,15 @@ Generated on: ${DateTime.now().toString()}''';
     _consigneeAddressController.clear();
     _billingLadingController.clear();
     _sealNoController.clear();
+    _destinationController.clear();
     setState(() {
       _selectedPriority = 'medium';
       _selectedCargoType = 'dry';
       _generatedQRData = null;
       _showAddContainer = false;
+      _lastScannedContainerId = null;
+      _hasGeneratedQR = false;
     });
-    _loadNextContainerId();
   }
 
   void _showErrorDialog(String message) {
@@ -411,7 +739,7 @@ Generated on: ${DateTime.now().toString()}''';
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         icon: Icon(Icons.error_outline, color: Colors.red[700], size: 40),
         title: const Text(
-          'Validation Error',
+          'Error',
           style: TextStyle(
             color: Color(0xFF1a3a6b),
             fontWeight: FontWeight.bold,
@@ -462,6 +790,7 @@ Generated on: ${DateTime.now().toString()}''';
     );
   }
 
+  // ... (rest of your build methods remain exactly the same)
   Widget _buildAddContainerButton() {
     return Center(
       child: SingleChildScrollView(
@@ -548,21 +877,12 @@ Generated on: ${DateTime.now().toString()}''';
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  'Next ID: $_nextContainerId',
-                  style: GoogleFonts.poppins(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: const Color(0xFF1a3a6b),
+                  'Next Container ID: $_nextContainerId',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey[600],
+                    fontWeight: FontWeight.w500,
                   ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () {
-                    setState(() {
-                      _showAddContainer = false;
-                    });
-                    _resetForm();
-                  },
                 ),
               ],
             ),
@@ -657,6 +977,13 @@ Generated on: ${DateTime.now().toString()}''';
               Icons.lock_outline,
               hint: 'e.g., SEAL789',
             ),
+            const SizedBox(height: 12),
+            _buildTextField(
+              'Destination',
+              _destinationController,
+              Icons.location_on_outlined,
+              hint: 'e.g., New York, USA',
+            ),
             const SizedBox(height: 32),
             SizedBox(
               width: double.infinity,
@@ -664,7 +991,7 @@ Generated on: ${DateTime.now().toString()}''';
               child: ElevatedButton.icon(
                 onPressed: _generateQRCode,
                 icon: const Icon(Icons.qr_code_2),
-                label: const Text('Generate & Download QR Code'),
+                label: const Text('Generate QR Code'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF1a3a6b),
                   foregroundColor: Colors.white,
@@ -797,6 +1124,7 @@ Generated on: ${DateTime.now().toString()}''';
     _consigneeAddressController.dispose();
     _billingLadingController.dispose();
     _sealNoController.dispose();
+    _destinationController.dispose();
     super.dispose();
   }
 }
