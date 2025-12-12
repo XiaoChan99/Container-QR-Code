@@ -404,7 +404,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             _buildActionCard(
               title: 'Reports',
-              subtitle: 'Generate reports',
+              subtitle: 'View Monthly Reports',
               icon: Icons.analytics,
               color: Colors.purple.shade600,
               onTap: () {

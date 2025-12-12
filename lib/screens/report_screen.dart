@@ -16,8 +16,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
   Map<String, int> _priorityStats = {};
   Map<String, int> _statusStats = {};
   Map<String, int> _cargoTypeStats = {};
-  int _totalScans = 0;
-  int _averageScansPerDay = 0;
+  int _totalContainers = 0;
+  int _averageContainersPerDay = 0;
 
   @override
   void initState() {
@@ -39,7 +39,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
       }
 
       final query = await _firestore
-          .collection('ScanHistory')
+          .collection('Containers')
           .where('scannedAt', isGreaterThanOrEqualTo: Timestamp.fromDate(startDate))
           .get();
 
@@ -47,19 +47,38 @@ class _ReportsScreenState extends State<ReportsScreen> {
       Map<String, int> statusMap = {};
       Map<String, int> cargoTypeMap = {};
 
+      // Define statuses to exclude
+      final excludedStatuses = ['delivered', 'accepted', 'inprogress', 'in transit', 'completed'];
+      
       for (var doc in query.docs) {
         final data = doc.data();
         
         // Priority stats
-        final priority = data['priority'] ?? 'unknown';
+        final priority = data['priority']?.toString().toLowerCase() ?? 'unknown';
         priorityMap[priority] = (priorityMap[priority] ?? 0) + 1;
 
-        // Status stats
-        final status = data['status'] ?? 'unknown';
-        statusMap[status] = (statusMap[status] ?? 0) + 1;
+        // Status stats - only include non-delivery related statuses
+        final status = data['status']?.toString().toLowerCase() ?? 'unknown';
+        
+        // Only include if status is NOT in excluded list
+        bool shouldExclude = false;
+        for (var excluded in excludedStatuses) {
+          if (status.contains(excluded)) {
+            shouldExclude = true;
+            break;
+          }
+        }
+        
+        if (!shouldExclude) {
+          // Format status for display (capitalize first letter)
+          final displayStatus = status.isNotEmpty 
+              ? status[0].toUpperCase() + status.substring(1)
+              : 'Unknown';
+          statusMap[displayStatus] = (statusMap[displayStatus] ?? 0) + 1;
+        }
 
         // Cargo type stats
-        final cargoType = data['cargoType'] ?? 'unknown';
+        final cargoType = data['cargoType']?.toString().toLowerCase() ?? 'unknown';
         cargoTypeMap[cargoType] = (cargoTypeMap[cargoType] ?? 0) + 1;
       }
 
@@ -73,8 +92,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
         _priorityStats = priorityMap;
         _statusStats = statusMap;
         _cargoTypeStats = cargoTypeMap;
-        _totalScans = query.size;
-        _averageScansPerDay = (_totalScans / daysInPeriod).ceil();
+        _totalContainers = query.size;
+        _averageContainersPerDay = daysInPeriod > 0 ? (_totalContainers / daysInPeriod).ceil() : _totalContainers;
       });
     } catch (e) {
       print('Error loading report data: $e');
@@ -202,17 +221,17 @@ class _ReportsScreenState extends State<ReportsScreen> {
           children: [
             Expanded(
               child: _buildStatBox(
-                'Total Scans',
-                _totalScans.toString(),
+                'Total Containers',
+                _totalContainers.toString(),
                 Colors.blue,
-                Icons.qr_code_scanner,
+                Icons.inventory_2,
               ),
             ),
             const SizedBox(width: 12),
             Expanded(
               child: _buildStatBox(
                 'Avg. Per Day',
-                _averageScansPerDay.toString(),
+                _averageContainersPerDay.toString(),
                 Colors.green,
                 Icons.trending_up,
               ),
@@ -301,6 +320,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
         Colors.green.shade400,
         Colors.orange.shade400,
         Colors.red.shade400,
+        Colors.purple.shade400,
       ],
     );
   }
@@ -315,6 +335,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
         Colors.cyan.shade400,
         Colors.indigo.shade400,
         Colors.pink.shade400,
+        Colors.teal.shade400,
       ],
     );
   }
@@ -325,6 +346,17 @@ class _ReportsScreenState extends State<ReportsScreen> {
     required Map<String, int> stats,
     required List<Color> colors,
   }) {
+    // Format keys for display
+    final Map<String, int> formattedStats = {};
+    stats.forEach((key, value) {
+      if (key.isNotEmpty) {
+        final formattedKey = key[0].toUpperCase() + key.substring(1);
+        formattedStats[formattedKey] = value;
+      } else {
+        formattedStats['Unknown'] = value;
+      }
+    });
+
     return Card(
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -355,7 +387,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
               ],
             ),
             const SizedBox(height: 20),
-            if (stats.isEmpty)
+            if (formattedStats.isEmpty)
               Center(
                 child: Text(
                   'No data available',
@@ -367,11 +399,11 @@ class _ReportsScreenState extends State<ReportsScreen> {
               )
             else
               Column(
-                children: List.from(stats.entries).asMap().entries.map((entry) {
+                children: List.from(formattedStats.entries).asMap().entries.map((entry) {
                   final index = entry.key;
                   final category = entry.value.key;
                   final count = entry.value.value;
-                  final total = stats.values.reduce((a, b) => a + b);
+                  final total = formattedStats.values.reduce((a, b) => a + b);
                   final percentage = (count / total * 100).toStringAsFixed(1);
                   final color = colors[index % colors.length];
 

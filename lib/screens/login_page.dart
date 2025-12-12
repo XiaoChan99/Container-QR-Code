@@ -70,7 +70,6 @@ class _LoginPageState extends State<LoginPage> {
                     const SizedBox(height: 24),
                     _buildLoginButton(true),
                     const SizedBox(height: 24),
-                    _buildSignUpLink(true),
                   ],
                 ),
               ),
@@ -104,7 +103,6 @@ class _LoginPageState extends State<LoginPage> {
                     SizedBox(height: isSmallScreen ? 16.0 : 24.0),
                     _buildLoginButton(false),
                     SizedBox(height: isSmallScreen ? 16.0 : 24.0),
-                    _buildSignUpLink(false),
                   ],
                 ),
               ),
@@ -447,37 +445,7 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
-  Widget _buildSignUpLink(bool isDesktop) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Text(
-          "Don't have an account?  ",
-          style: TextStyle(
-            color: Colors.grey[700],
-            fontSize: isDesktop ? 15 : 14,
-            fontWeight: FontWeight.w400,
-          ),
-        ),
-        GestureDetector(
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (context) => const RegistrationPage()),
-            );
-          },
-          child: Text(
-            'Sign up',
-            style: TextStyle(
-              color: const Color(0xFF2d5aa0),
-              fontWeight: FontWeight.bold,
-              fontSize: isDesktop ? 15 : 14,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
+  
 
   Future<void> _login() async {
     final email = _emailController.text.trim();
